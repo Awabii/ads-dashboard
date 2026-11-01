@@ -1155,3 +1155,25 @@ export async function reapAbandonedSyncRuns(
     .returning({ id: syncRuns.id });
   return reaped.length;
 }
+
+/**
+ * How long each client's Meta reconcile usually takes, in ms: the longest of its
+ * last three successful runs in the past fortnight. The longest, so a slow night
+ * is planned for. The cron uses it to avoid starting a client it cannot finish
+ * before the function is killed (see `fitsBeforeDeadline`). A client with no
+ * recent success is absent, and the caller assumes a default.
+ */
+export async function usualMetaRunMs(): Promise<Map<string, number>> {
+  const result = await db.execute<{ client_id: string; ms: number }>(sql`
+    SELECT client_id, max(extract(epoch FROM finished_at - started_at) * 1000)::float AS ms
+      FROM (SELECT client_id, started_at, finished_at,
+                   row_number() OVER (PARTITION BY client_id ORDER BY started_at DESC) AS n
+              FROM sync_runs
+             WHERE kind = 'meta_daily' AND status = 'success'
+               AND finished_at IS NOT NULL
+               AND started_at > now() - interval '14 days') recent
+     WHERE n <= 3
+     GROUP BY client_id
+  `);
+  return new Map((result.rows ?? []).map((r) => [r.client_id, Number(r.ms)]));
+}

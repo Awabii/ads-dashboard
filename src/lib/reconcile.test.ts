@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isReconcileOverdue } from "./reconcile";
+import { isReconcileOverdue, fitsBeforeDeadline } from "./reconcile";
 import { lastLocalHourBoundary } from "./dates";
 
 const LA = "America/Los_Angeles";
@@ -108,5 +108,24 @@ describe("isReconcileOverdue", () => {
     expect(isReconcileOverdue(LA, at330, undefined, AUG_5_LOCAL_10AM)).toBe(
       false,
     );
+  });
+});
+
+describe("fitsBeforeDeadline", () => {
+  it("🔴 refuses a client whose usual run would outlast the function", () => {
+    // King LASIK, 1 Nov 2026: about 95 s, started 238 s in, killed at 300 s.
+    expect(fitsBeforeDeadline(238_000, 95_000)).toBe(false);
+    // The same client earlier in the run finishes in time: 150 + 95 × 1.25 = 268.75 s.
+    expect(fitsBeforeDeadline(150_000, 95_000)).toBe(true);
+  });
+
+  it("allows a quarter more than usual, for a slow night", () => {
+    expect(fitsBeforeDeadline(180_000, 80_000)).toBe(true); // 180 + 100 = 280, just in
+    expect(fitsBeforeDeadline(180_001, 80_000)).toBe(false);
+  });
+
+  it("assumes a minute for a client with no recent success", () => {
+    expect(fitsBeforeDeadline(205_000, undefined)).toBe(true); // 205 + 75 = 280
+    expect(fitsBeforeDeadline(206_000, undefined)).toBe(false);
   });
 });

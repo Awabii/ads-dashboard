@@ -40,6 +40,30 @@ export const DEFAULT_RECONCILE_HOUR = 3;
  * as overdue, which is correct: a client that has never been reconciled should
  * be picked up by the very next run.
  */
+/** Latest point a cron run should still be working: 20 s inside its 300 s `maxDuration`. */
+export const RUN_FINISH_BY_MS = 280_000;
+
+/** Assumed length of a client's run when it has no recent success to go by. */
+export const DEFAULT_CLIENT_RUN_MS = 60_000;
+
+/**
+ * Can a client still be synced in this run, given how long it usually takes?
+ *
+ * A client started too late is killed at `maxDuration` with nothing to show:
+ * its run is reaped as abandoned, and the whole cron call reads as failed. That
+ * was King LASIK, about 95 s, started with 60–95 s left on 30 Oct–1 Nov 2026.
+ * A quarter is added for a slow night. The caller always starts a run's first
+ * client whatever this says: nothing else could use the time, and refusing it
+ * would refuse it every night.
+ */
+export function fitsBeforeDeadline(
+  elapsedMs: number,
+  usualMs: number | undefined,
+  finishByMs: number = RUN_FINISH_BY_MS,
+): boolean {
+  return elapsedMs + (usualMs ?? DEFAULT_CLIENT_RUN_MS) * 1.25 <= finishByMs;
+}
+
 export function isReconcileOverdue(
   timezone: string,
   lastReconciledAt: Date | null,

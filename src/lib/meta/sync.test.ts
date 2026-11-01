@@ -815,6 +815,33 @@ describe("reapAbandonedSyncRuns", () => {
   });
 });
 
+describe("usualMetaRunMs", () => {
+  let n = 0;
+  const insertRun = (secs: number, opts: { daysAgo?: number; kind?: string; status?: string } = {}) =>
+    run(
+      `INSERT INTO sync_runs (id, client_id, kind, status, started_at, finished_at)
+       VALUES ('aaaaaaaa-0000-4000-8000-0000000000${String(++n).padStart(2, "0")}', '${CLIENT_ID}',
+               '${opts.kind ?? "meta_daily"}', '${opts.status ?? "success"}',
+               now() - interval '${opts.daysAgo ?? 1} days',
+               now() - interval '${opts.daysAgo ?? 1} days' + interval '${secs} seconds')`,
+    );
+
+  it("🔴 is the longest of the client's last three successful reconciles", async () => {
+    await insertRun(90, { daysAgo: 1 });
+    await insertRun(120, { daysAgo: 2 });
+    await insertRun(95, { daysAgo: 3 });
+    await insertRun(250, { daysAgo: 4 }); // a fourth run back no longer counts
+    expect((await mod.usualMetaRunMs()).get(CLIENT_ID)).toBe(120_000);
+  });
+
+  it("ignores failures, on-load refreshes and anything older than a fortnight", async () => {
+    await insertRun(300, { status: "failed" });
+    await insertRun(200, { kind: "meta_intraday" });
+    await insertRun(280, { daysAgo: 20 });
+    expect((await mod.usualMetaRunMs()).has(CLIENT_ID)).toBe(false);
+  });
+});
+
 /* ------------------------------------------------------------------ *
  * The window constant
  * ------------------------------------------------------------------ */

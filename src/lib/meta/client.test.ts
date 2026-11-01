@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+import { shiftDateKey } from "@/lib/dates";
 import {
   parseInsightRow,
   segmentLabel,
@@ -6,6 +7,8 @@ import {
   isFieldRefusal,
   isReduceDataError,
   isResultFieldRefusal,
+  isMetaTimeout,
+  RANKING_FIELDS,
   metaVersion,
   META_BREAKDOWNS,
   MetaApiError,
@@ -383,6 +386,152 @@ describe("insightFields", () => {
     for (const f of ["actions", "spend", "impressions", "reach", "inline_link_clicks"]) {
       expect(campaign).toContain(f);
     }
+  });
+
+  it("leaves only the rankings out when told to", () => {
+    const all = insightFields("ad").split(",");
+    const without = insightFields("ad", { rankings: false }).split(",");
+    expect(without).toEqual(all.filter((f) => !(RANKING_FIELDS as readonly string[]).includes(f)));
+    expect(all.length - without.length).toBe(RANKING_FIELDS.length);
+  });
+});
+
+describe("an ad-level window Meta times out on", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  const ok = (body: unknown) =>
+    ({ ok: true, status: 200, headers: new Headers(), json: async () => body }) as unknown as Response;
+  const timedOut = (code: number, subcode: number, message: string) =>
+    ({
+      ok: false,
+      status: 500,
+      headers: new Headers(),
+      json: async () => ({ error: { code, error_subcode: subcode, message } }),
+    }) as unknown as Response;
+  /** One row a day for ad `a1` across the window asked for. */
+  const figures = (u: URL) => {
+    const { since, until } = JSON.parse(u.searchParams.get("time_range") ?? "{}");
+    const data = [];
+    for (let d = since; d <= until; d = shiftDateKey(d, 1)) data.push({ ad_id: "a1", date_start: d, spend: "1" });
+    return ok({ data });
+  };
+  const isCombined = (u: URL) => /quality_ranking/.test(u.searchParams.get("fields") ?? "") && /spend/.test(u.searchParams.get("fields") ?? "");
+  const isRankingsOnly = (u: URL) => u.searchParams.get("fields") === ["ad_id", ...RANKING_FIELDS].join(",");
+
+  it("recognises Meta giving up on a heavy request, and only that", () => {
+    expect(isMetaTimeout(new MetaApiError("An unknown error occurred", 500, 1, 99))).toBe(true);
+    expect(isMetaTimeout(new MetaApiError("Service temporarily unavailable", 503, 2, 1504044))).toBe(true);
+    // Its own message, its own path: the window is halved in sync.ts.
+    expect(isMetaTimeout(new MetaApiError("Please reduce the amount of data you're asking for, then retry your request", 500, 1))).toBe(false);
+    expect(isMetaTimeout(new MetaApiError("Error validating access token", 400, 190))).toBe(false);
+    expect(isMetaTimeout(new Error("An unknown error occurred"))).toBe(false);
+  });
+
+  it("🔴 asks a week at a time without the rankings, gets the rankings apart, and joins them on ad and day", async () => {
+    // Clearview, 2 Nov 2026: the one request failed every night; the parts take 4–13 s each.
+    const seen: URL[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = new URL(String(url));
+        seen.push(u);
+        if (isCombined(u)) return timedOut(1, 99, "An unknown error occurred");
+        if (isRankingsOnly(u)) {
+          return ok({
+            data: [
+              {
+                ad_id: "a1",
+                date_start: "2026-10-31",
+                quality_ranking: "ABOVE_AVERAGE",
+                engagement_rate_ranking: "AVERAGE",
+                conversion_rate_ranking: "BELOW_AVERAGE_10",
+              },
+            ],
+          });
+        }
+        return figures(u);
+      }),
+    );
+
+    const rows = await new MetaClient("tok").getDailyInsights("act_1", "2026-10-05", "2026-11-01", "ad");
+
+    expect(rows).toHaveLength(28);
+    const weeks = seen.slice(1, -1);
+    expect(weeks.map((u) => JSON.parse(u.searchParams.get("time_range")!))).toEqual([
+      { since: "2026-10-05", until: "2026-10-11" },
+      { since: "2026-10-12", until: "2026-10-18" },
+      { since: "2026-10-19", until: "2026-10-25" },
+      { since: "2026-10-26", until: "2026-11-01" },
+    ]);
+    for (const u of weeks) {
+      expect(u.searchParams.get("fields")).not.toMatch(/ranking/);
+      // Everything else the nightly asks for is still asked for.
+      expect(u.searchParams.get("fields")).toContain("results");
+    }
+    const last = seen[seen.length - 1];
+    expect(isRankingsOnly(last)).toBe(true);
+    expect(JSON.parse(last.searchParams.get("time_range")!)).toEqual({ since: "2026-10-05", until: "2026-11-01" });
+
+    expect(rows.filter((r) => r.quality_ranking)).toEqual([
+      expect.objectContaining({
+        ad_id: "a1",
+        date_start: "2026-10-31",
+        spend: "1",
+        quality_ranking: "ABOVE_AVERAGE",
+        engagement_rate_ranking: "AVERAGE",
+        conversion_rate_ranking: "BELOW_AVERAGE_10",
+      }),
+    ]);
+  });
+
+  it("keeps the rows when the rankings fail as well", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        const u = new URL(String(url));
+        if (isCombined(u)) return timedOut(2, 1504044, "Service temporarily unavailable");
+        if (isRankingsOnly(u)) return timedOut(1, 99, "An unknown error occurred");
+        return figures(u);
+      }),
+    );
+    const rows = await new MetaClient("tok").getDailyInsights("act_1", "2026-10-26", "2026-11-01", "ad");
+    expect(rows).toHaveLength(7);
+    expect(rows.every((r) => r.spend === "1" && r.quality_ranking === undefined)).toBe(true);
+  });
+
+  it("throws a week that still times out", async () => {
+    const spy = vi.fn(async () => timedOut(1, 99, "An unknown error occurred"));
+    vi.stubGlobal("fetch", spy);
+    const err = await new MetaClient("tok")
+      .getDailyInsights("act_1", "2026-10-26", "2026-11-01", "ad")
+      .catch((e: unknown) => e);
+    expect(isMetaTimeout(err)).toBe(true);
+    // The whole window once, then its first week; no rankings asked for rows that never came.
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("🔴 never splits campaign level, and never splits any other failure", async () => {
+    const timeout = vi.fn(async () => timedOut(1, 99, "An unknown error occurred"));
+    vi.stubGlobal("fetch", timeout);
+    await expect(
+      new MetaClient("tok").getDailyInsights("act_1", "2026-10-05", "2026-11-01", "campaign"),
+    ).rejects.toBeInstanceOf(MetaApiError);
+    expect(timeout).toHaveBeenCalledTimes(1);
+
+    const badToken = vi.fn(
+      async () =>
+        ({
+          ok: false,
+          status: 400,
+          headers: new Headers(),
+          json: async () => ({ error: { code: 190, message: "Error validating access token" } }),
+        }) as unknown as Response,
+    );
+    vi.stubGlobal("fetch", badToken);
+    await expect(
+      new MetaClient("tok").getDailyInsights("act_1", "2026-10-05", "2026-11-01", "ad"),
+    ).rejects.toBeInstanceOf(MetaApiError);
+    expect(badToken).toHaveBeenCalledTimes(1);
   });
 });
 

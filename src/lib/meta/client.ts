@@ -1,4 +1,5 @@
 import { appSecretProof } from "@/lib/crypto";
+import { shiftDateKey } from "@/lib/dates";
 import type { BreakdownKey } from "@/db/schema";
 
 /**
@@ -176,6 +177,16 @@ const BASE_INSIGHT_FIELDS = [
 ];
 
 /**
+ * The delivery rankings, named apart because they are the costly part of an
+ * ad-level request: see `getDailyInsights`.
+ */
+export const RANKING_FIELDS = [
+  "quality_ranking",
+  "engagement_rate_ranking",
+  "conversion_rate_ranking",
+] as const;
+
+/**
  * Extra fields that only exist, or only mean anything, below campaign level.
  *
  * Requested only for `adset`/`ad` on purpose. Meta charges the same either way,
@@ -196,9 +207,7 @@ const AD_INSIGHT_FIELDS = [
   "video_p75_watched_actions",
   "video_p95_watched_actions",
   "video_p100_watched_actions",
-  "quality_ranking",
-  "engagement_rate_ranking",
-  "conversion_rate_ranking",
+  ...RANKING_FIELDS,
 ];
 
 /* ------------------------------------------------------------------ *
@@ -318,13 +327,16 @@ export const RESULT_INSIGHT_FIELDS = ["results", "objective"] as const;
 
 export function insightFields(
   level: InsightLevel,
-  opts: { results?: boolean } = {},
+  opts: { results?: boolean; rankings?: boolean } = {},
 ): string {
-  const fields: string[] =
+  let fields: string[] =
     level === "ad" || level === "adset"
       ? [...BASE_INSIGHT_FIELDS, ...AD_INSIGHT_FIELDS]
       : [...BASE_INSIGHT_FIELDS];
   if (opts.results !== false) fields.push(...RESULT_INSIGHT_FIELDS);
+  if (opts.rankings === false) {
+    fields = fields.filter((f) => !(RANKING_FIELDS as readonly string[]).includes(f));
+  }
   return fields.join(",");
 }
 
@@ -352,6 +364,28 @@ export function isFieldRefusal(err: unknown, fields: readonly string[]): boolean
 export function isReduceDataError(err: unknown): boolean {
   const message = err instanceof Error ? err.message : String(err);
   return /reduce the amount of data/i.test(message);
+}
+
+/**
+ * Meta giving up on a request too heavy to finish in time. After about 30
+ * seconds it answers "An unknown error occurred" (code 1, subcode 99) or
+ * "Service temporarily unavailable" (code 2). Both were seen on 2 Nov 2026 for
+ * an ad-level request that succeeds when asked for in smaller parts. Not
+ * "reduce the amount of data", which names its own cause and has its own path.
+ */
+export function isMetaTimeout(err: unknown): boolean {
+  if (!(err instanceof MetaApiError) || isReduceDataError(err)) return false;
+  return (err.code === 1 && err.subcode === 99) || err.code === 2;
+}
+
+/** A window as consecutive weeks, the last one short. Date keys are calendar labels, so this is plain arithmetic. */
+function weeksOf(since: string, until: string): Array<[string, string]> {
+  const weeks: Array<[string, string]> = [];
+  for (let from = since; from <= until; from = shiftDateKey(from, 7)) {
+    const to = shiftDateKey(from, 6);
+    weeks.push([from, to < until ? to : until]);
+  }
+  return weeks;
 }
 
 /** The ad's shareable preview link — optional: the listing never fails for want of it. */
@@ -765,6 +799,10 @@ export class MetaClient {
    * `use_unified_attribution_setting=true` makes the `actions` figures respect
    * the ad set's attribution setting, which is what reproduces the numbers the
    * client sees in Ads Manager.
+   *
+   * An ad-level window Meta times out on is asked for again in parts (see
+   * `adInsightsInParts`). Campaign level is never split: it is the light request,
+   * and a timeout there is an outage, not a size problem.
    */
   async getDailyInsights(
     accountId: string,
@@ -773,17 +811,89 @@ export class MetaClient {
     level: InsightLevel = "campaign",
   ): Promise<MetaInsightRow[]> {
     try {
-      return await this.dailyInsights(accountId, since, until, level, true);
+      return await this.withOptionalResults(level, (results) =>
+        this.dailyInsights(accountId, since, until, level, insightFields(level, { results })),
+      );
+    } catch (err) {
+      if (level !== "ad" || !isMetaTimeout(err)) throw err;
+      console.warn(
+        `[meta] ad-level insights for ${since}..${until} timed out at Meta; asking a week at a time, rankings apart:`,
+        (err as Error).message,
+      );
+      return this.adInsightsInParts(accountId, since, until);
+    }
+  }
+
+  /**
+   * Ask with the results fields, and once more without them if Meta refuses
+   * them. Loud in the log, quiet for the client: their spend still syncs, and
+   * the results widgets say "no results yet" for these days.
+   */
+  private async withOptionalResults(
+    level: InsightLevel,
+    pull: (results: boolean) => Promise<MetaInsightRow[]>,
+  ): Promise<MetaInsightRow[]> {
+    try {
+      return await pull(true);
     } catch (err) {
       if (!isResultFieldRefusal(err)) throw err;
-      // Loud in the log, quiet for the client: their spend still syncs, and the
-      // results widgets say "no results yet" for these days.
       console.warn(
         `[meta] insights refused the results fields at ${level} level; retrying without them:`,
         (err as Error).message,
       );
-      return this.dailyInsights(accountId, since, until, level, false);
+      return pull(false);
     }
+  }
+
+  /**
+   * Ad-level insights for a window Meta cannot answer in one request.
+   *
+   * Measured on a live account, 2 Nov 2026: one week of ad rows WITH the
+   * delivery rankings hit Meta's 30-second limit ("An unknown error occurred").
+   * The same week without them took 12.6 s, and the rankings alone took 4 s for
+   * all 28 days. So the figures are asked for a week at a time without the
+   * rankings, the rankings in one request of their own, and the two are joined
+   * on ad and day: the same rows the single request would have returned.
+   *
+   * A ranking is a diagnostic, not a figure. If that request fails as well, the
+   * rows are kept without rankings rather than lost. A week that still times out
+   * is a real failure and is thrown.
+   */
+  private async adInsightsInParts(
+    accountId: string,
+    since: string,
+    until: string,
+  ): Promise<MetaInsightRow[]> {
+    const rows: MetaInsightRow[] = [];
+    for (const [from, to] of weeksOf(since, until)) {
+      rows.push(
+        ...(await this.withOptionalResults("ad", (results) =>
+          this.dailyInsights(accountId, from, to, "ad", insightFields("ad", { results, rankings: false })),
+        )),
+      );
+    }
+
+    let ranked: MetaInsightRow[] = [];
+    try {
+      ranked = await this.dailyInsights(accountId, since, until, "ad", ["ad_id", ...RANKING_FIELDS].join(","));
+    } catch (err) {
+      console.warn(
+        `[meta] delivery rankings unavailable for ${since}..${until}; keeping the rows without them:`,
+        (err as Error).message,
+      );
+    }
+    const byAdDay = new Map(ranked.map((r) => [`${r.ad_id}|${r.date_start}`, r]));
+    return rows.map((row) => {
+      const r = byAdDay.get(`${row.ad_id}|${row.date_start}`);
+      return r
+        ? {
+            ...row,
+            quality_ranking: r.quality_ranking,
+            engagement_rate_ranking: r.engagement_rate_ranking,
+            conversion_rate_ranking: r.conversion_rate_ranking,
+          }
+        : row;
+    });
   }
 
   private async dailyInsights(
@@ -791,7 +901,7 @@ export class MetaClient {
     since: string,
     until: string,
     level: InsightLevel,
-    withResults: boolean,
+    fields: string,
   ): Promise<MetaInsightRow[]> {
     const act = MetaClient.normalizeAccountId(accountId);
     const rows: MetaInsightRow[] = [];
@@ -805,7 +915,7 @@ export class MetaClient {
             level,
             time_increment: 1,
             time_range: JSON.stringify({ since, until }),
-            fields: insightFields(level, { results: withResults }),
+            fields,
             use_unified_attribution_setting: true,
             limit: 500,
           });

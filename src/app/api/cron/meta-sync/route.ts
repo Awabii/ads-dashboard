@@ -1,15 +1,20 @@
 import { NextRequest, NextResponse } from "next/server";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "@/db";
 import { clients } from "@/db/schema";
 import {
   syncClientMetrics,
   reapAbandonedSyncRuns,
+  usualMetaRunMs,
   RECONCILE_DAYS,
 } from "@/lib/meta/sync";
 import { activeAdAccounts } from "@/lib/meta/accounts";
 import { trailingWindowInclusive } from "@/lib/dates";
-import { isReconcileOverdue, DEFAULT_RECONCILE_HOUR } from "@/lib/reconcile";
+import {
+  isReconcileOverdue,
+  fitsBeforeDeadline,
+  DEFAULT_RECONCILE_HOUR,
+} from "@/lib/reconcile";
 import { safeEqual } from "@/lib/crypto";
 
 /**
@@ -70,10 +75,13 @@ export async function GET(req: NextRequest) {
   // running and the health checklist stays honest.
   const reaped = await reapAbandonedSyncRuns();
 
+  // Longest-waiting first, so a client deferred or killed last run leads this one.
   const active = await db
     .select()
     .from(clients)
-    .where(eq(clients.status, "active"));
+    .where(eq(clients.status, "active"))
+    .orderBy(sql`${clients.lastMetaReconciledAt} ASC NULLS FIRST`);
+  const usualMs = await usualMetaRunMs();
 
   const results: Array<{
     slug: string;
@@ -82,13 +90,8 @@ export async function GET(req: NextRequest) {
     error?: string;
   }> = [];
 
+  let started = 0;
   for (const client of active) {
-    if (Date.now() - startedAt > DISPATCH_BUDGET_MS) {
-      // Out of time. Say so rather than appearing to have covered everyone.
-      results.push({ slug: client.slug, status: "deferred" });
-      continue;
-    }
-
     const accounts = await activeAdAccounts(client.id);
     if (accounts.length === 0) {
       results.push({ slug: client.slug, status: "skipped" });
@@ -105,6 +108,18 @@ export async function GET(req: NextRequest) {
       results.push({ slug: client.slug, status: "skipped" });
       continue;
     }
+
+    const elapsed = Date.now() - startedAt;
+    if (
+      elapsed > DISPATCH_BUDGET_MS ||
+      (started > 0 && !fitsBeforeDeadline(elapsed, usualMs.get(client.id)))
+    ) {
+      // Out of time for this one. Say so rather than appearing to have covered
+      // everyone; a smaller client further down may still fit.
+      results.push({ slug: client.slug, status: "deferred" });
+      continue;
+    }
+    started++;
 
     try {
       const window = trailingWindowInclusive(RECONCILE_DAYS, client.timezone);
