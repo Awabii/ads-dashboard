@@ -46,11 +46,20 @@ const FLOWS = [
 
 const SETUP_PAGE = read("c/[slug]/setup/page.tsx");
 
+const WIZARD = readFileSync(join(APP, "..", "components", "SetupWizard.tsx"), "utf8");
+
 describe("OAuth callback → setup handoff", () => {
   it.each(FLOWS)("$name success returns to the setup page", ({ callback, param }) => {
     const src = read(callback);
     expect(src).toMatch(/back\.pathname = `\/c\/\$\{client\.slug\}\/setup`/);
     expect(src).toContain(`back.searchParams.set("${param}"`);
+  });
+
+  it.each(FLOWS)("🔴 $name comes back to its own section, not the top of the page", ({ name, callback }) => {
+    // A fresh load opens at the top, two or three sections above the picker the
+    // operator came back for. The anchor the callback names must exist.
+    expect(read(callback)).toContain(`back.hash = SETUP_SECTION.${name};`);
+    expect(WIZARD).toContain(`anchor={SETUP_SECTION.${name}}`);
   });
 
   it.each(FLOWS)("$name writes a param the setup page reads", ({ param }) => {

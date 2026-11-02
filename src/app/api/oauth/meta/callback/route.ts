@@ -7,6 +7,7 @@ import { safeFailureMessage } from "@/lib/api-failure";
 import { exchangeMetaCode } from "@/lib/meta/oauth";
 import { stashMetaConnection } from "@/lib/meta/connect";
 import { META_STATE_COOKIE } from "../authorize/route";
+import { SETUP_SECTION } from "@/lib/setup-sections";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -123,6 +124,8 @@ export async function GET(req: NextRequest) {
   back.pathname = `/c/${client.slug}/setup`;
   back.search = "";
   back.searchParams.set("metaStash", stashId);
+  // Back at the Meta section, where the picker opens, not the top of the page.
+  back.hash = SETUP_SECTION.meta;
 
   const res = NextResponse.redirect(back);
   res.cookies.delete(META_STATE_COOKIE);

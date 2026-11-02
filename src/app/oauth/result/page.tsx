@@ -7,6 +7,7 @@ import { getClientForSession } from "@/lib/clients";
 import { getSessionUser } from "@/lib/auth";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { AppShell } from "@/components/AppShell";
+import { setupHref } from "@/lib/setup-sections";
 
 export const dynamic = "force-dynamic";
 
@@ -217,7 +218,7 @@ export default async function OAuthResultPage({
           {ok && slug ? (
             <>
               <Link
-                href={`/c/${slug}/setup`}
+                href={setupHref(slug, unmapped > 0 ? "stages" : provider)}
                 className="btn-accent flex-1"
               >
                 {unmapped > 0 ? "Map stages & finish setup" : "Finish setup"}
@@ -243,7 +244,7 @@ export default async function OAuthResultPage({
           ) : (
             <>
               <Link
-                href={slug ? `/c/${slug}/setup` : "/"}
+                href={slug ? setupHref(slug, provider) : "/"}
                 className="btn-accent flex-1"
               >
                 Back to setup

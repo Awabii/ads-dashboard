@@ -7,6 +7,7 @@ import { safeFailureMessage } from "@/lib/api-failure";
 import { exchangeTiktokCode } from "@/lib/tiktok/oauth";
 import { stashTiktokConnection } from "@/lib/tiktok/connect";
 import { TIKTOK_STATE_COOKIE } from "../authorize/route";
+import { SETUP_SECTION } from "@/lib/setup-sections";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -129,6 +130,8 @@ export async function GET(req: NextRequest) {
   back.pathname = `/c/${client.slug}/setup`;
   back.search = "";
   back.searchParams.set("tiktokStash", stashId);
+  // Back at the TikTok section, where the picker opens, not the top of the page.
+  back.hash = SETUP_SECTION.tiktok;
 
   const res = NextResponse.redirect(back);
   res.cookies.delete(TIKTOK_STATE_COOKIE);

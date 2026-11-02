@@ -7,6 +7,7 @@ import { exchangeGoogleCode } from "@/lib/google/oauth";
 import { stashGoogleConnection } from "@/lib/google/connect";
 import { getClientUnscoped } from "@/lib/clients";
 import { GOOGLE_STATE_COOKIE } from "../authorize/route";
+import { SETUP_SECTION } from "@/lib/setup-sections";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -125,6 +126,8 @@ export async function GET(req: NextRequest) {
   back.pathname = `/c/${client.slug}/setup`;
   back.search = "";
   back.searchParams.set("googleStash", stashId);
+  // Back at the Google section, where the picker opens, not the top of the page.
+  back.hash = SETUP_SECTION.google;
 
   const res = NextResponse.redirect(back);
   res.cookies.delete(GOOGLE_STATE_COOKIE);

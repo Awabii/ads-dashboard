@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
+import { SETUP_SECTION } from "@/lib/setup-sections";
 import {
   CONFIRM_ATTACH_ABOVE,
   MAX_ATTACH_PER_SIGN_IN,
@@ -303,6 +304,17 @@ export function SetupWizard({
   const usingOauth = initial.ghlAuthMethod === "oauth" || oauthAvailable;
 
   /*
+   * A sign-in comes back as a fresh page load addressed to its platform's
+   * section (`#meta`, `#google-ads`, `#tiktok`). The browser jumps there while
+   * the page loads; this lands it there again once the page is interactive, in
+   * case anything above it changed height in between.
+   */
+  useEffect(() => {
+    const id = window.location.hash.slice(1);
+    if (id) document.getElementById(id)?.scrollIntoView({ block: "start" });
+  }, []);
+
+  /*
    * After a successful attach, take the used-up sign-in out of the address.
    * Left there, the page re-rendered the picker on every refresh and a reload
    * met a stash the server had already dropped.
@@ -419,6 +431,7 @@ function InstallStep({
   return (
     <Card
       step={1}
+      anchor={SETUP_SECTION.ghl}
       title="Connect GoHighLevel"
       description="Installs the marketplace app on the client's sub-account. No workflow building required — stage changes stream automatically."
       done={Boolean(active) || connectedViaWebhook}
@@ -885,16 +898,19 @@ function Card({
   title,
   description,
   done,
+  anchor,
   children,
 }: {
   step: number;
   title: string;
   description?: string;
   done?: boolean;
+  /** The section's id, so a sign-in can come back to it (`SETUP_SECTION`). */
+  anchor?: string;
   children: React.ReactNode;
 }) {
   return (
-    <section className="card p-5">
+    <section id={anchor} className="card scroll-mt-6 p-5">
       <div className="mb-3 flex items-start gap-3">
         <span
           className="mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-[11px] font-bold"
@@ -1017,6 +1033,7 @@ function GhlStep({
   return (
     <Card
       step={1}
+      anchor={SETUP_SECTION.ghl}
       title="Connect GoHighLevel"
       description="A Private Integration Token for this sub-account, plus its location ID."
       done={Boolean(initial.ghlLocationName)}
@@ -1209,6 +1226,7 @@ function StageStep({
   return (
     <Card
       step={2}
+      anchor={SETUP_SECTION.stages}
       title="Map pipeline stages"
       description="Your GHL stage names, mapped onto the seven canonical funnel stages."
       done={rows.length > 0 && missing.length === 0}
@@ -1546,6 +1564,7 @@ function MetaAccountsStep({
   return (
     <Card
       step={3}
+      anchor={SETUP_SECTION.meta}
       title="Connect Meta ad accounts"
       description="Add every ad account this client runs. Spend and metrics are summed across all of them."
       done={live.length > 0}
@@ -2242,6 +2261,7 @@ function GoogleAccountsStep({
   return (
     <Card
       step={4}
+      anchor={SETUP_SECTION.google}
       title="Connect Google Ads (optional)"
       description="Add the client's Customer ID. Spend, impressions and clicks are summed in alongside Meta."
       done={live.length > 0}
@@ -2834,6 +2854,7 @@ function TiktokAccountsStep({
   return (
     <Card
       step={5}
+      anchor={SETUP_SECTION.tiktok}
       title="Connect TikTok advertisers"
       description="Optional. Adds TikTok spend alongside Meta and Google so the blended totals are complete."
       done={live.length > 0}
