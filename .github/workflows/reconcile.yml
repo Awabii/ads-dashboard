@@ -156,6 +156,23 @@ jobs:
             "$BASE_URL/api/cron/pacing"
           python3 -c "$SUMMARY" /tmp/pacing.json Pacing
 
+      - name: Billing client counts
+        if: ${{ !cancelled() && steps.secret.outcome == 'success' }}
+        run: |
+          # Sets each billed agency's Stripe subscription to its number of
+          # active clients, so the invoice Stripe sends on the 1st matches the
+          # dashboard. It never charges anything itself (proration is off) and
+          # changes nothing when the count already matches, so this cadence is
+          # safe. A subscription it could not update returns 502, which fails
+          # this step: a wrong count is a wrong bill. Which one, and why, is in
+          # the Vercel function logs, not here. Until STRIPE_SECRET_KEY is set
+          # on the deployment it answers "billing not configured".
+          curl -fsS --max-time 60 \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            -o /tmp/billing.json \
+            "$BASE_URL/api/cron/billing"
+          python3 -c "$SUMMARY" /tmp/billing.json Billing
+
       - name: Flag deferred clients
         if: ${{ !cancelled() && steps.secret.outcome == 'success' }}
         run: |

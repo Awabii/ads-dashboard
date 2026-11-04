@@ -33,6 +33,7 @@ const PUBLIC_ROUTES: Record<string, string> = {
   "cron/tiktok-sync/route.ts": "guarded by the CRON_SECRET bearer token",
   "cron/pacing/route.ts": "guarded by the CRON_SECRET bearer token",
   "cron/reports/route.ts": "guarded by the CRON_SECRET bearer token",
+  "cron/billing/route.ts": "guarded by the CRON_SECRET bearer token",
   "auth/route.ts": "this is the endpoint that issues a session",
   "auth/forgot/route.ts":
     "requesting a reset link cannot require the session you have lost; rate-limited, and the response is identical whether or not the address has an account so it cannot be used as a membership oracle",
