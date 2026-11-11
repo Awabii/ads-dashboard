@@ -61,7 +61,7 @@ jobs:
       run:
         shell: bash
     env:
-      BASE_URL: https://ads-dashboard-shaheer4.vercel.app
+      BASE_URL: https://ads-dashboard-delta-seven.vercel.app
       # 🔴 What a step prints of its response: one line of counts, never the
       # response itself.
       #
